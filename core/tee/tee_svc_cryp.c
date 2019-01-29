@@ -8,6 +8,7 @@
 #include <crypto/crypto.h>
 #include <kernel/tee_ta_manager.h>
 #include <mm/tee_mmu.h>
+#include <stdlib_ext.h>
 #include <string_ext.h>
 #include <string.h>
 #include <sys/queue.h>
@@ -1594,7 +1595,7 @@ TEE_Result syscall_cryp_obj_populate(unsigned long obj,
 		o->info.handleFlags |= TEE_HANDLE_FLAG_INITIALIZED;
 
 out:
-	free(attrs);
+	free_wipe(attrs);
 	return res;
 }
 
@@ -1871,7 +1872,7 @@ TEE_Result syscall_obj_generate_key(unsigned long obj, unsigned long key_size,
 	}
 
 out:
-	free(params);
+	free_wipe(params);
 	if (res == TEE_SUCCESS) {
 		o->info.keySize = key_size;
 		o->info.handleFlags |= TEE_HANDLE_FLAG_INITIALIZED;
@@ -2913,7 +2914,7 @@ TEE_Result syscall_cryp_derive_key(unsigned long state,
 		res = TEE_ERROR_NOT_SUPPORTED;
 
 out:
-	free(params);
+	free_wipe(params);
 	return res;
 }
 
@@ -3392,7 +3393,7 @@ TEE_Result syscall_asymm_operate(unsigned long state,
 	}
 
 out:
-	free(params);
+	free_wipe(params);
 
 	if (res == TEE_SUCCESS || res == TEE_ERROR_SHORT_BUFFER) {
 		TEE_Result res2 = put_user_u64(dst_len, dlen);
@@ -3513,6 +3514,6 @@ TEE_Result syscall_asymm_verify(unsigned long state,
 	}
 
 out:
-	free(params);
+	free_wipe(params);
 	return res;
 }
