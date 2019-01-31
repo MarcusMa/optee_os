@@ -2049,8 +2049,14 @@ static TEE_Result rpmb_fs_write_primitive(struct rpmb_file_handle *fh,
 	if (fh->fat_entry.flags & FILE_IS_LAST_ENTRY)
 		panic("invalid last entry flag");
 
-	end = pos + size;
-	start_addr = fh->fat_entry.start_address + pos;
+	if (ADD_OVERFLOW(pos, size, &end)) {
+		res = TEE_ERROR_BAD_PARAMETERS;
+		goto out;
+	}
+	if (ADD_OVERFLOW(fh->fat_entry.start_address, pos, &start_addr)) {
+		res = TEE_ERROR_BAD_PARAMETERS;
+		goto out;
+	}
 
 	if (end <= fh->fat_entry.data_size &&
 	    tee_rpmb_write_is_atomic(CFG_RPMB_FS_DEV_ID, start_addr, size)) {
