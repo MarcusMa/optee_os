@@ -784,8 +784,6 @@ static void transpose_area(struct tee_pager_area *area, struct pgt *new_pgt,
 			core_mmu_get_entry(&old_ti, pmem->pgidx, &pa, &attr);
 			core_mmu_set_entry(&old_ti, pmem->pgidx, 0, 0);
 
-			assert(pa == get_pmem_pa(pmem));
-			assert(attr);
 			assert(area->pgt->num_used_entries);
 			area->pgt->num_used_entries--;
 
@@ -905,7 +903,6 @@ bool tee_pager_set_uta_area_attr(struct user_ta_ctx *utc, vaddr_t base,
 	struct tee_pager_area *area = find_area(utc->areas, b);
 	uint32_t exceptions;
 	struct tee_pager_pmem *pmem;
-	paddr_t pa;
 	uint32_t a;
 	uint32_t f;
 	uint32_t f2;
@@ -929,8 +926,7 @@ bool tee_pager_set_uta_area_attr(struct user_ta_ctx *utc, vaddr_t base,
 		TAILQ_FOREACH(pmem, &tee_pager_pmem_head, link) {
 			if (pmem->area != area)
 				continue;
-			area_get_entry(pmem->area, pmem->pgidx, &pa, &a);
-			assert(pa == get_pmem_pa(pmem));
+			area_get_entry(pmem->area, pmem->pgidx, NULL, &a);
 			if (a == f)
 				continue;
 			area_set_entry(pmem->area, pmem->pgidx, 0, 0);
@@ -941,7 +937,8 @@ bool tee_pager_set_uta_area_attr(struct user_ta_ctx *utc, vaddr_t base,
 				f2 = f;
 			else
 				f2 = f & ~(TEE_MATTR_UW | TEE_MATTR_PW);
-			area_set_entry(pmem->area, pmem->pgidx, pa, f2);
+			area_set_entry(pmem->area, pmem->pgidx,
+				       get_pmem_pa(pmem), f2);
 			/*
 			 * Make sure the table update is visible before
 			 * continuing.
@@ -988,7 +985,6 @@ static bool tee_pager_unhide_page(struct tee_pager_area *area,
 {
 	struct tee_pager_pmem *pmem = pmem_find(area, pgidx);
 	uint32_t a = get_area_mattr(area->flags);
-	paddr_t pa = 0;
 
 	if (!pmem || pmem->pgidx == INVALID_PGIDX || !pmem_is_hidden(pmem))
 		return false;
@@ -1003,9 +999,7 @@ static bool tee_pager_unhide_page(struct tee_pager_area *area,
 		a &= ~(TEE_MATTR_PW | TEE_MATTR_UW);
 
 	pmem->flags &= ~PMEM_FLAG_HIDDEN;
-	area_get_entry(pmem->area, pmem->pgidx, &pa, NULL);
-	assert(pa == get_pmem_pa(pmem));
-	area_set_entry(pmem->area, pmem->pgidx, pa, a);
+	area_set_entry(pmem->area, pmem->pgidx, get_pmem_pa(pmem), a);
 	/*
 	 * Note that TLB invalidation isn't needed since
 	 * there wasn't a valid mapping before. We should
@@ -1024,7 +1018,6 @@ static void tee_pager_hide_pages(void)
 {
 	struct tee_pager_pmem *pmem;
 	size_t n = 0;
-	paddr_t pa = 0;
 
 	TAILQ_FOREACH(pmem, &tee_pager_pmem_head, link) {
 		if (n >= TEE_PAGER_NHIDE)
@@ -1039,9 +1032,7 @@ static void tee_pager_hide_pages(void)
 			continue;
 
 		pmem->flags |= PMEM_FLAG_HIDDEN;
-		area_get_entry(pmem->area, pmem->pgidx, &pa, NULL);
-		assert(pa == get_pmem_pa(pmem));
-		area_set_entry(pmem->area, pmem->pgidx, pa, 0);
+		area_set_entry(pmem->area, pmem->pgidx, 0, 0);
 		tlbi_mva_allasid(area_idx2va(pmem->area, pmem->pgidx));
 	}
 }
@@ -1055,19 +1046,13 @@ static bool tee_pager_release_one_phys(struct tee_pager_area *area,
 {
 	struct tee_pager_pmem *pmem;
 	unsigned pgidx;
-	paddr_t pa;
-	uint32_t attr;
 
 	pgidx = area_va2idx(area, page_va);
-	area_get_entry(area, pgidx, &pa, &attr);
-
-	FMSG("%" PRIxVA " : %" PRIxPA "|%x", page_va, pa, attr);
 
 	TAILQ_FOREACH(pmem, &tee_pager_lock_pmem_head, link) {
 		if (pmem->area != area || pmem->pgidx != pgidx)
 			continue;
 
-		assert(pa == get_pmem_pa(pmem));
 		area_set_entry(area, pgidx, 0, 0);
 		pgt_dec_used_entries(area->pgt);
 		TAILQ_REMOVE(&tee_pager_lock_pmem_head, pmem, link);
