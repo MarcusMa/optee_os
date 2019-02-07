@@ -620,47 +620,34 @@ static void free_area(struct tee_pager_area *area)
 	free(area);
 }
 
-static bool pager_add_uta_area(struct user_ta_ctx *utc, vaddr_t base,
-			       size_t size)
+static TEE_Result pager_add_uta_area(struct user_ta_ctx *utc, vaddr_t base,
+				     struct fobj *fobj)
 {
 	struct tee_pager_area *area;
 	vaddr_t b = base;
-	struct fobj *fobj;
 	size_t fobj_pgidx = 0;
-	size_t s = ROUNDUP(size, SMALL_PAGE_SIZE);
+	size_t s = fobj->num_pages * SMALL_PAGE_SIZE;
 
 	if (!utc->areas) {
 		utc->areas = malloc(sizeof(*utc->areas));
 		if (!utc->areas)
-			return false;
+			return TEE_ERROR_OUT_OF_MEMORY;
 		TAILQ_INIT(utc->areas);
 	}
-
-	fobj = fobj_rw_paged_alloc(s / SMALL_PAGE_SIZE);
-	if (!fobj)
-		return false;
 
 	while (s) {
 		size_t s2;
 
-		if (find_area(utc->areas, b)) {
-			fobj_put(fobj);
-			return false;
-		}
+		if (find_area(utc->areas, b))
+			return TEE_ERROR_BAD_PARAMETERS;
 
 		s2 = MIN(CORE_MMU_PGDIR_SIZE - (b & CORE_MMU_PGDIR_MASK), s);
 		area = calloc(1, sizeof(*area));
-		if (!area) {
-			fobj_put(fobj);
-			return false;
-		}
-
-		if (b != base)
-			fobj_get(fobj);
+		if (!area)
+			return TEE_ERROR_OUT_OF_MEMORY;
 
 		/* Table info will be set when the context is activated. */
-
-		area->fobj = fobj;
+		area->fobj = fobj_get(fobj);
 		area->fobj_pgidx = fobj_pgidx;
 		area->type = PAGER_AREA_TYPE_RW;
 		area->base = b;
@@ -673,11 +660,13 @@ static bool pager_add_uta_area(struct user_ta_ctx *utc, vaddr_t base,
 		fobj_pgidx += s2 / SMALL_PAGE_SIZE;
 	}
 
-	return true;
+	return TEE_SUCCESS;
 }
 
-bool tee_pager_add_uta_area(struct user_ta_ctx *utc, vaddr_t base, size_t size)
+TEE_Result tee_pager_add_uta_area(struct user_ta_ctx *utc, vaddr_t base,
+			    struct fobj *fobj)
 {
+	TEE_Result res;
 	struct thread_specific_data *tsd = thread_get_tsd();
 	struct tee_pager_area *area;
 	struct core_mmu_table_info dir_info = { NULL };
@@ -687,7 +676,7 @@ bool tee_pager_add_uta_area(struct user_ta_ctx *utc, vaddr_t base, size_t size)
 		 * Changes are to an utc that isn't active. Just add the
 		 * areas page tables will be dealt with later.
 		 */
-		return pager_add_uta_area(utc, base, size);
+		return pager_add_uta_area(utc, base, fobj);
 	}
 
 	/*
@@ -695,7 +684,8 @@ bool tee_pager_add_uta_area(struct user_ta_ctx *utc, vaddr_t base, size_t size)
 	 * are newly added and should be removed in case of failure.
 	 */
 	tee_pager_assign_uta_tables(utc);
-	if (!pager_add_uta_area(utc, base, size)) {
+	res = pager_add_uta_area(utc, base, fobj);
+	if (res) {
 		struct tee_pager_area *next_a;
 
 		/* Remove all added areas */
@@ -705,7 +695,7 @@ bool tee_pager_add_uta_area(struct user_ta_ctx *utc, vaddr_t base, size_t size)
 				free_area(area);
 			}
 		}
-		return false;
+		return res;
 	}
 
 	/*
@@ -742,7 +732,7 @@ bool tee_pager_add_uta_area(struct user_ta_ctx *utc, vaddr_t base, size_t size)
 		core_mmu_set_entry(&dir_info, idx, pa, attr);
 	}
 
-	return true;
+	return TEE_SUCCESS;
 }
 
 static void init_tbl_info_from_pgt(struct core_mmu_table_info *ti,
