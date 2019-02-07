@@ -53,7 +53,15 @@ SECTIONS {
 	.ARM.exidx : { *(.ARM.exidx* .gnu.linkonce.armexidx.*) }
         .ctors : { *(.ctors) }
         .dtors : { *(.dtors) }
-	.got : { *(.got.plt) *(.got) }
+	.dynamic : { *(.dynamic) } :dyn :rodata
+	.dynsym : { *(.dynsym) } :rodata
+	.dynstr : { *(.dynstr) }
+	.hash : { *(.hash) }
+
+	/* Page align to allow dropping execute bit for RW data */
+	. = ALIGN(4096);
+
+	.got : { *(.got.plt) *(.got) } :rwdata
 	.rel.text : { *(.rel.text) *(.rel.gnu.linkonce.t*) }
 	.rela.text : { *(.rela.text) *(.rela.gnu.linkonce.t*) }
 	.rel.data : { *(.rel.data) *(.rel.gnu.linkonce.d*) }
@@ -75,15 +83,8 @@ SECTIONS {
 	.rela.bss : { *(.rela.bss) }
 	.rel.plt : { *(.rel.plt) }
 	.rela.plt : { *(.rela.plt) }
-	.dynamic : { *(.dynamic) } :dyn :rodata
-	.dynsym : { *(.dynsym) } :rodata
-	.dynstr : { *(.dynstr) }
-	.hash : { *(.hash) }
 
-	/* Page align to allow dropping execute bit for RW data */
-	. = ALIGN(4096);
-
-	.data : { *(.data .data.* .gnu.linkonce.d.*) } :rwdata
+	.data : { *(.data .data.* .gnu.linkonce.d.*) }
 	.bss : {
 		*(.bss .bss.* .gnu.linkonce.b.* COMMON)
 
