@@ -893,11 +893,13 @@ static void init_thread_stacks(void)
 		tee_pager_add_pages(tee_mm_get_smem(mm), tee_mm_get_size(mm),
 				    true);
 
+		size_t num_pages = tee_mm_get_bytes(mm) / SMALL_PAGE_SIZE - 1;
+		struct fobj *fobj = fobj_locked_paged_alloc(num_pages);
+
 		/* Add the area to the pager */
 		tee_pager_add_core_area(tee_mm_get_smem(mm) + SMALL_PAGE_SIZE,
-					tee_mm_get_bytes(mm) - SMALL_PAGE_SIZE,
-					TEE_MATTR_PRW | TEE_MATTR_LOCKED,
-					NULL, NULL);
+					PAGER_AREA_TYPE_LOCK, fobj);
+		fobj_put(fobj);
 
 		/* init effective stack */
 		sp = tee_mm_get_smem(mm) + tee_mm_get_bytes(mm);
