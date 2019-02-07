@@ -28,18 +28,6 @@
 #include <utee_defines.h>
 #include <util.h>
 
-struct tee_pager_area {
-	struct fobj *fobj;
-	size_t fobj_pgidx;
-	enum tee_pager_area_type type;
-	uint32_t flags;
-	vaddr_t base;
-	size_t size;
-	struct pgt *pgt;
-	TAILQ_ENTRY(tee_pager_area) link;
-};
-
-TAILQ_HEAD(tee_pager_area_head, tee_pager_area);
 
 static struct tee_pager_area_head tee_pager_area_head =
 	TAILQ_HEAD_INITIALIZER(tee_pager_area_head);
@@ -52,17 +40,17 @@ static struct tee_pager_area_head tee_pager_area_head =
  * struct tee_pager_pmem - Represents a physical page used for paging.
  *
  * @flags	flags defined by PMEM_FLAG_* above
- * @pgidx	an index of the entry in area->ti.
+ * @fobj_pgidx	index of the page in the @fobj
+ * @fobj	File object of which a page is made visible.
  * @va_alias	Virtual address where the physical page always is aliased.
  *		Used during remapping of the page when the content need to
  *		be updated before it's available at the new location.
- * @area	a pointer to the pager area
  */
 struct tee_pager_pmem {
 	unsigned int flags;
-	unsigned int pgidx;
+	unsigned int fobj_pgidx;
+	struct fobj *fobj;
 	void *va_alias;
-	struct tee_pager_area *area;
 	TAILQ_ENTRY(tee_pager_pmem) link;
 };
 
@@ -276,6 +264,28 @@ static bool pmem_is_dirty(struct tee_pager_pmem *pmem)
 	return pmem->flags & PMEM_FLAG_DIRTY;
 }
 
+static bool pmem_is_covered_by_area(struct tee_pager_pmem *pmem,
+				    struct tee_pager_area *area)
+{
+	if (pmem->fobj != area->fobj)
+		return false;
+	if (pmem->fobj_pgidx < area->fobj_pgoffs)
+		return false;
+	if ((pmem->fobj_pgidx - area->fobj_pgoffs) >=
+		(area->size >> SMALL_PAGE_SHIFT))
+		return false;
+
+	return true;
+}
+
+static size_t pmem_get_area_tblidx(struct tee_pager_pmem *pmem,
+				   struct tee_pager_area *area)
+{
+	size_t tbloffs = (area->base & CORE_MMU_PGDIR_MASK) >> SMALL_PAGE_SHIFT;
+
+	return pmem->fobj_pgidx - area->fobj_pgoffs + tbloffs;
+}
+
 static struct pager_table *find_pager_table_may_fail(vaddr_t va)
 {
 	size_t n;
@@ -328,6 +338,7 @@ void tee_pager_set_alias_area(tee_mm_entry_t *mm)
 	vaddr_t smem = tee_mm_get_smem(mm);
 	size_t nbytes = tee_mm_get_bytes(mm);
 	vaddr_t v;
+	uint32_t a = 0;
 
 	DMSG("0x%" PRIxVA " - 0x%" PRIxVA, smem, smem + nbytes);
 
@@ -344,7 +355,10 @@ void tee_pager_set_alias_area(tee_mm_entry_t *mm)
 			if (v >= (smem + nbytes))
 				goto out;
 
+			core_mmu_get_entry(&pt->tbl_info, idx, NULL, &a);
 			core_mmu_set_entry(&pt->tbl_info, idx, 0, 0);
+			if (a & TEE_MATTR_VALID_BLOCK)
+				pgt_dec_used_entries(&pt->pgt);
 			idx++;
 		}
 
@@ -448,6 +462,7 @@ static void area_insert_tail(struct tee_pager_area *area)
 	uint32_t exceptions = pager_lock_check_stack(8);
 
 	TAILQ_INSERT_TAIL(&tee_pager_area_head, area, link);
+	TAILQ_INSERT_TAIL(&area->fobj->areas, area, fobj_link);
 
 	pager_unlock(exceptions);
 }
@@ -458,7 +473,7 @@ void tee_pager_add_core_area(vaddr_t base, enum tee_pager_area_type type,
 {
 	struct tee_pager_area *area;
 	uint32_t flags;
-	size_t fobj_pgidx = 0;
+	size_t fobj_pgoffs = 0;
 	vaddr_t b = base;
 	size_t s = fobj->num_pages * SMALL_PAGE_SIZE;
 	size_t s2;
@@ -495,7 +510,7 @@ void tee_pager_add_core_area(vaddr_t base, enum tee_pager_area_type type,
 			panic("alloc_area");
 
 		area->fobj = fobj_get(fobj);
-		area->fobj_pgidx = fobj_pgidx;
+		area->fobj_pgoffs = fobj_pgoffs;
 		area->type = type;
 		area->pgt = find_core_pgt(b);
 		area->base = b;
@@ -505,7 +520,7 @@ void tee_pager_add_core_area(vaddr_t base, enum tee_pager_area_type type,
 
 		b += s2;
 		s -= s2;
-		fobj_pgidx += s2 / SMALL_PAGE_SIZE;
+		fobj_pgoffs += s2 / SMALL_PAGE_SIZE;
 	}
 }
 
@@ -565,8 +580,8 @@ static paddr_t get_pmem_pa(struct tee_pager_pmem *pmem)
 static void tee_pager_load_page(struct tee_pager_area *area, vaddr_t page_va,
 			void *va_alias)
 {
-	size_t fobj_pgidx = ((page_va - area->base) >> SMALL_PAGE_SHIFT) +
-			    area->fobj_pgidx;
+	size_t fobj_pgoffs = ((page_va - area->base) >> SMALL_PAGE_SHIFT) +
+			     area->fobj_pgoffs;
 	struct core_mmu_table_info *ti;
 	uint32_t attr_alias;
 	paddr_t pa_alias;
@@ -583,7 +598,7 @@ static void tee_pager_load_page(struct tee_pager_area *area, vaddr_t page_va,
 	}
 
 	asan_tag_access(va_alias, (uint8_t *)va_alias + SMALL_PAGE_SIZE);
-	if (fobj_load_page(area->fobj, fobj_pgidx, va_alias)) {
+	if (fobj_load_page(area->fobj, fobj_pgoffs, va_alias)) {
 		EMSG("PH 0x%" PRIxVA " failed", page_va);
 		panic();
 	}
@@ -609,13 +624,9 @@ static void tee_pager_load_page(struct tee_pager_area *area, vaddr_t page_va,
 static void tee_pager_save_page(struct tee_pager_pmem *pmem)
 {
 	if (pmem_is_dirty(pmem)) {
-		size_t offs = pmem->area->base & CORE_MMU_PGDIR_MASK;
-		size_t fobj_pgidx = (pmem->pgidx - (offs >> SMALL_PAGE_SHIFT)) +
-				     pmem->area->fobj_pgidx;
-
 		asan_tag_access(pmem->va_alias,
 				(uint8_t *)pmem->va_alias + SMALL_PAGE_SIZE);
-		if (fobj_save_page(pmem->area->fobj, fobj_pgidx,
+		if (fobj_save_page(pmem->fobj, pmem->fobj_pgidx,
 				   pmem->va_alias))
 			panic("fobj_save_page");
 		asan_tag_no_access(pmem->va_alias,
@@ -624,6 +635,18 @@ static void tee_pager_save_page(struct tee_pager_pmem *pmem)
 }
 
 #ifdef CFG_PAGED_USER_TA
+static void unlink_area(struct tee_pager_area_head *area_head,
+			struct tee_pager_area *area)
+{
+	uint32_t exceptions = pager_lock_check_stack(64);
+
+	TAILQ_REMOVE(area_head, area, link);
+	TAILQ_REMOVE(&area->fobj->areas, area, fobj_link);
+
+	pager_unlock(exceptions);
+}
+KEEP_PAGER(unlink_area);
+
 static void free_area(struct tee_pager_area *area)
 {
 	fobj_put(area->fobj);
@@ -635,7 +658,7 @@ static TEE_Result pager_add_uta_area(struct user_ta_ctx *utc, vaddr_t base,
 {
 	struct tee_pager_area *area;
 	vaddr_t b = base;
-	size_t fobj_pgidx = 0;
+	size_t fobj_pgoffs = 0;
 	size_t s = fobj->num_pages * SMALL_PAGE_SIZE;
 
 	if (!utc->areas) {
@@ -658,16 +681,17 @@ static TEE_Result pager_add_uta_area(struct user_ta_ctx *utc, vaddr_t base,
 
 		/* Table info will be set when the context is activated. */
 		area->fobj = fobj_get(fobj);
-		area->fobj_pgidx = fobj_pgidx;
+		area->fobj_pgoffs = fobj_pgoffs;
 		area->type = PAGER_AREA_TYPE_RW;
 		area->base = b;
 		area->size = s2;
 		area->flags = TEE_MATTR_PRW | TEE_MATTR_URWX;
 
 		TAILQ_INSERT_TAIL(utc->areas, area, link);
+		TAILQ_INSERT_TAIL(&fobj->areas, area, fobj_link);
 		b += s2;
 		s -= s2;
-		fobj_pgidx += s2 / SMALL_PAGE_SIZE;
+		fobj_pgoffs += s2 / SMALL_PAGE_SIZE;
 	}
 
 	return TEE_SUCCESS;
@@ -701,7 +725,7 @@ TEE_Result tee_pager_add_uta_area(struct user_ta_ctx *utc, vaddr_t base,
 		/* Remove all added areas */
 		TAILQ_FOREACH_SAFE(area, utc->areas, link, next_a) {
 			if (!area->pgt) {
-				TAILQ_REMOVE(utc->areas, area, link);
+				unlink_area(utc->areas, area);
 				free_area(area);
 			}
 		}
@@ -766,32 +790,32 @@ static void transpose_area(struct tee_pager_area *area, struct pgt *new_pgt,
 	 * deal with either, just update with a new pgt and base.
 	 */
 	if (area->pgt) {
+		/*
+		 * Just clear the old page table for now, once proper page
+		 * sharing is in place we can remove this.
+		 */
 		struct core_mmu_table_info old_ti;
-		struct core_mmu_table_info new_ti;
 		struct tee_pager_pmem *pmem;
+		uint32_t a = 0;
+		unsigned int last_pgoffs = area->fobj_pgoffs +
+					   (area->size >> SMALL_PAGE_SHIFT) - 1;
 
 		init_tbl_info_from_pgt(&old_ti, area->pgt);
-		init_tbl_info_from_pgt(&new_ti, new_pgt);
-
 
 		TAILQ_FOREACH(pmem, &tee_pager_pmem_head, link) {
-			vaddr_t va;
-			paddr_t pa;
-			uint32_t attr;
+			size_t idx = 0;
 
-			if (pmem->area != area)
+			if (pmem->fobj != area->fobj ||
+			    pmem->fobj_pgidx < area->fobj_pgoffs ||
+			    pmem->fobj_pgidx > last_pgoffs)
 				continue;
-			core_mmu_get_entry(&old_ti, pmem->pgidx, &pa, &attr);
-			core_mmu_set_entry(&old_ti, pmem->pgidx, 0, 0);
 
-			assert(area->pgt->num_used_entries);
-			area->pgt->num_used_entries--;
-
-			va = core_mmu_idx2va(&old_ti, pmem->pgidx);
-			va = va - area->base + new_base;
-			pmem->pgidx = core_mmu_va2idx(&new_ti, va);
-			core_mmu_set_entry(&new_ti, pmem->pgidx, pa, attr);
-			new_pgt->num_used_entries++;
+			idx = pmem_get_area_tblidx(pmem, area);
+			core_mmu_get_entry(&old_ti, idx, NULL, &a);
+			if (a & TEE_MATTR_VALID_BLOCK) {
+				core_mmu_set_entry(&old_ti, idx, 0, 0);
+				pgt_dec_used_entries(area->pgt);
+			}
 		}
 	}
 
@@ -826,6 +850,7 @@ void tee_pager_transfer_uta_region(struct user_ta_ctx *src_utc,
 		assert((new_area_base & ~CORE_MMU_PGDIR_MASK) ==
 		       dst_pgt[new_idx]->vabase);
 		transpose_area(area, dst_pgt[new_idx], new_area_base);
+		tlbi_asid(src_utc->vm_info->asid);
 
 		/*
 		 * Assert that this will not cause any conflicts in the new
@@ -841,23 +866,35 @@ static void rem_area(struct tee_pager_area_head *area_head,
 		     struct tee_pager_area *area)
 {
 	struct tee_pager_pmem *pmem;
+	size_t last_pgoffs = area->fobj_pgoffs +
+			     (area->size >> SMALL_PAGE_SHIFT) - 1;
 	uint32_t exceptions;
+	size_t idx = 0;
+	uint32_t a = 0;
 
 	exceptions = pager_lock_check_stack(64);
 
 	TAILQ_REMOVE(area_head, area, link);
+	TAILQ_REMOVE(&area->fobj->areas, area, fobj_link);
 
 	TAILQ_FOREACH(pmem, &tee_pager_pmem_head, link) {
-		if (pmem->area == area) {
-			area_set_entry(area, pmem->pgidx, 0, 0);
-			tlbi_mva_allasid(area_idx2va(area, pmem->pgidx));
-			pgt_dec_used_entries(area->pgt);
-			pmem->area = NULL;
-			pmem->pgidx = INVALID_PGIDX;
-		}
+		if (pmem->fobj != area->fobj ||
+		    pmem->fobj_pgidx < area->fobj_pgoffs ||
+		    pmem->fobj_pgidx > last_pgoffs)
+			continue;
+
+		idx = pmem_get_area_tblidx(pmem, area);
+		area_get_entry(area, idx, NULL, &a);
+		if (!(a & TEE_MATTR_VALID_BLOCK))
+			continue;
+
+		area_set_entry(area, idx, 0, 0);
+		tlbi_mva_allasid(area_idx2va(area, idx));
+		pgt_dec_used_entries(area->pgt);
 	}
 
 	pager_unlock(exceptions);
+
 	free_area(area);
 }
 KEEP_PAGER(rem_area);
@@ -873,6 +910,7 @@ void tee_pager_rem_uta_region(struct user_ta_ctx *utc, vaddr_t base,
 		if (core_is_buffer_inside(area->base, area->size, base, s))
 			rem_area(utc->areas, area);
 	}
+	tlbi_asid(utc->vm_info->asid);
 }
 
 void tee_pager_rem_uta_areas(struct user_ta_ctx *utc)
@@ -886,7 +924,7 @@ void tee_pager_rem_uta_areas(struct user_ta_ctx *utc)
 		area = TAILQ_FIRST(utc->areas);
 		if (!area)
 			break;
-		TAILQ_REMOVE(utc->areas, area, link);
+		unlink_area(utc->areas, area);
 		free_area(area);
 	}
 
@@ -906,6 +944,7 @@ bool tee_pager_set_uta_area_attr(struct user_ta_ctx *utc, vaddr_t base,
 	uint32_t a;
 	uint32_t f;
 	uint32_t f2;
+	size_t tblidx = 0;
 
 	f = (flags & TEE_MATTR_URWX) | TEE_MATTR_UR | TEE_MATTR_PR;
 	if (f & TEE_MATTR_UW)
@@ -924,30 +963,35 @@ bool tee_pager_set_uta_area_attr(struct user_ta_ctx *utc, vaddr_t base,
 		s -= s2;
 
 		TAILQ_FOREACH(pmem, &tee_pager_pmem_head, link) {
-			if (pmem->area != area)
+			if (!pmem_is_covered_by_area(pmem, area))
 				continue;
-			area_get_entry(pmem->area, pmem->pgidx, NULL, &a);
+
+			tblidx = pmem_get_area_tblidx(pmem, area);
+			area_get_entry(area, tblidx, NULL, &a);
 			if (a == f)
 				continue;
-			area_set_entry(pmem->area, pmem->pgidx, 0, 0);
-			tlbi_mva_allasid(area_idx2va(pmem->area, pmem->pgidx));
+			area_set_entry(area, tblidx, 0, 0);
+			tlbi_mva_allasid(area_idx2va(area, tblidx));
 
 			pmem->flags &= ~PMEM_FLAG_HIDDEN;
 			if (pmem_is_dirty(pmem))
 				f2 = f;
 			else
 				f2 = f & ~(TEE_MATTR_UW | TEE_MATTR_PW);
-			area_set_entry(pmem->area, pmem->pgidx,
-				       get_pmem_pa(pmem), f2);
+			area_set_entry(area, tblidx, get_pmem_pa(pmem), f2);
+			if (!(a & TEE_MATTR_VALID_BLOCK))
+				pgt_inc_used_entries(area->pgt);
 			/*
 			 * Make sure the table update is visible before
 			 * continuing.
 			 */
 			dsb_ishst();
 
+			/*
+			 * Here's a problem if this page already is shared.
+			 */
 			if (flags & TEE_MATTR_UX) {
-				void *va = (void *)area_idx2va(pmem->area,
-							       pmem->pgidx);
+				void *va = (void *)area_idx2va(area, tblidx);
 
 				cache_op_inner(DCACHE_AREA_CLEAN, va,
 						SMALL_PAGE_SIZE);
@@ -968,25 +1012,49 @@ out:
 KEEP_PAGER(tee_pager_set_uta_area_attr);
 #endif /*CFG_PAGED_USER_TA*/
 
+void tee_pager_invalidate_fobj(struct fobj *fobj)
+{
+	struct tee_pager_pmem *pmem;
+	uint32_t exceptions;
+
+	exceptions = pager_lock_check_stack(64);
+
+	TAILQ_FOREACH(pmem, &tee_pager_pmem_head, link) {
+		if (pmem->fobj == fobj) {
+			pmem->fobj = NULL;
+			pmem->fobj_pgidx = INVALID_PGIDX;
+		}
+	}
+
+	pager_unlock(exceptions);
+}
+KEEP_PAGER(tee_pager_invalidate_fobj);
+
 static struct tee_pager_pmem *pmem_find(struct tee_pager_area *area,
-					unsigned int pgidx)
+					unsigned int tblidx)
 {
 	struct tee_pager_pmem *pmem;
 
 	TAILQ_FOREACH(pmem, &tee_pager_pmem_head, link)
-		if (pmem->area == area && pmem->pgidx == pgidx)
+		if (pmem->fobj == area->fobj &&
+		    pmem_get_area_tblidx(pmem, area) == tblidx)
 			return pmem;
 
 	return NULL;
 }
 
 static bool tee_pager_unhide_page(struct tee_pager_area *area,
-				  unsigned int pgidx)
+				  unsigned int tblidx)
 {
-	struct tee_pager_pmem *pmem = pmem_find(area, pgidx);
+	struct tee_pager_pmem *pmem = pmem_find(area, tblidx);
 	uint32_t a = get_area_mattr(area->flags);
+	uint32_t attr = 0;
 
-	if (!pmem || pmem->pgidx == INVALID_PGIDX || !pmem_is_hidden(pmem))
+	if (!pmem)
+		return false;
+
+	area_get_entry(area, tblidx, NULL, &attr);
+	if (attr & TEE_MATTR_VALID_BLOCK)
 		return false;
 
 	/* page is hidden, show and move to back */
@@ -999,7 +1067,8 @@ static bool tee_pager_unhide_page(struct tee_pager_area *area,
 		a &= ~(TEE_MATTR_PW | TEE_MATTR_UW);
 
 	pmem->flags &= ~PMEM_FLAG_HIDDEN;
-	area_set_entry(pmem->area, pmem->pgidx, get_pmem_pa(pmem), a);
+	area_set_entry(area, tblidx, get_pmem_pa(pmem), a);
+	pgt_inc_used_entries(area->pgt);
 	/*
 	 * Note that TLB invalidation isn't needed since
 	 * there wasn't a valid mapping before. We should
@@ -1016,24 +1085,36 @@ static bool tee_pager_unhide_page(struct tee_pager_area *area,
 
 static void tee_pager_hide_pages(void)
 {
-	struct tee_pager_pmem *pmem;
+	struct tee_pager_pmem *pmem = NULL;
+	struct tee_pager_area *area = NULL;
 	size_t n = 0;
+	size_t tblidx = 0;
+	uint32_t a = 0;
 
 	TAILQ_FOREACH(pmem, &tee_pager_pmem_head, link) {
 		if (n >= TEE_PAGER_NHIDE)
 			break;
 		n++;
 
-		/* we cannot hide pages when pmem->area is not defined. */
-		if (!pmem->area)
+		/* we cannot hide pages when pmem->fobj is not defined. */
+		if (!pmem->fobj)
 			continue;
 
 		if (pmem_is_hidden(pmem))
 			continue;
 
 		pmem->flags |= PMEM_FLAG_HIDDEN;
-		area_set_entry(pmem->area, pmem->pgidx, 0, 0);
-		tlbi_mva_allasid(area_idx2va(pmem->area, pmem->pgidx));
+		TAILQ_FOREACH(area, &pmem->fobj->areas, fobj_link) {
+			if (!area->pgt || !pmem_is_covered_by_area(pmem, area))
+				continue;
+			tblidx = pmem_get_area_tblidx(pmem, area);
+			area_get_entry(area, tblidx, NULL, &a);
+			if (a & TEE_MATTR_VALID_BLOCK) {
+				area_set_entry(area, tblidx, 0, 0);
+				pgt_dec_used_entries(area->pgt);
+				tlbi_mva_allasid(area_idx2va(area, tblidx));
+			}
+		}
 	}
 }
 
@@ -1045,19 +1126,24 @@ static bool tee_pager_release_one_phys(struct tee_pager_area *area,
 				       vaddr_t page_va)
 {
 	struct tee_pager_pmem *pmem;
-	unsigned pgidx;
-
-	pgidx = area_va2idx(area, page_va);
+	size_t tblidx = 0;
+	size_t pgidx = area_va2idx(area, page_va) + area->fobj_pgoffs -
+		       ((area->base & CORE_MMU_PGDIR_MASK) >> SMALL_PAGE_SHIFT);
 
 	TAILQ_FOREACH(pmem, &tee_pager_lock_pmem_head, link) {
-		if (pmem->area != area || pmem->pgidx != pgidx)
+		if (pmem->fobj != area->fobj || pmem->fobj_pgidx != pgidx)
 			continue;
 
-		area_set_entry(area, pgidx, 0, 0);
+		assert(TAILQ_FIRST(&pmem->fobj->areas) == area);
+		assert(TAILQ_LAST(&pmem->fobj->areas,
+				  tee_pager_area_head) == area);
+
+		tblidx = pmem_get_area_tblidx(pmem, area);
+		area_set_entry(area, tblidx, 0, 0);
 		pgt_dec_used_entries(area->pgt);
 		TAILQ_REMOVE(&tee_pager_lock_pmem_head, pmem, link);
-		pmem->area = NULL;
-		pmem->pgidx = INVALID_PGIDX;
+		pmem->fobj = NULL;
+		pmem->fobj_pgidx = INVALID_PGIDX;
 		tee_pager_npages++;
 		set_npages();
 		TAILQ_INSERT_HEAD(&tee_pager_pmem_head, pmem, link);
@@ -1068,8 +1154,8 @@ static bool tee_pager_release_one_phys(struct tee_pager_area *area,
 	return false;
 }
 
-/* Finds the oldest page and unmats it from its old virtual address */
-static struct tee_pager_pmem *tee_pager_get_page(struct tee_pager_area *area)
+/* Finds the oldest page and unmaps it from all tables */
+static struct tee_pager_pmem *tee_pager_get_page(enum tee_pager_area_type at)
 {
 	struct tee_pager_pmem *pmem;
 
@@ -1078,19 +1164,36 @@ static struct tee_pager_pmem *tee_pager_get_page(struct tee_pager_area *area)
 		EMSG("No pmem entries");
 		return NULL;
 	}
-	if (pmem->pgidx != INVALID_PGIDX) {
-		assert(pmem->area && pmem->area->pgt);
-		area_set_entry(pmem->area, pmem->pgidx, 0, 0);
-		pgt_dec_used_entries(pmem->area->pgt);
-		tlbi_mva_allasid(area_idx2va(pmem->area, pmem->pgidx));
+
+	if (pmem->fobj) {
+		struct tee_pager_area *area = NULL;
+		size_t tblidx = 0;
+		uint32_t a = 0;
+
+		TAILQ_FOREACH(area, &pmem->fobj->areas, fobj_link) {
+			if (!area->pgt ||
+			    pmem->fobj_pgidx < area->fobj_pgoffs ||
+			    (pmem->fobj_pgidx - area->fobj_pgoffs) >=
+				(area->size >> SMALL_PAGE_SHIFT))
+				continue;
+
+			tblidx = pmem_get_area_tblidx(pmem, area);
+			area_get_entry(area, tblidx, NULL, &a);
+			if (a & TEE_MATTR_VALID_BLOCK) {
+				area_set_entry(area, tblidx, 0, 0);
+				pgt_dec_used_entries(area->pgt);
+				tlbi_mva_allasid(area_idx2va(area, tblidx));
+			}
+		}
+
 		tee_pager_save_page(pmem);
 	}
 
 	TAILQ_REMOVE(&tee_pager_pmem_head, pmem, link);
-	pmem->pgidx = INVALID_PGIDX;
-	pmem->area = NULL;
+	pmem->fobj = NULL;
+	pmem->fobj_pgidx = INVALID_PGIDX;
 	pmem->flags = 0;
-	if (area->type == PAGER_AREA_TYPE_LOCK) {
+	if (at == PAGER_AREA_TYPE_LOCK) {
 		/* Move page to lock list */
 		if (tee_pager_npages <= 0)
 			panic("running out of page");
@@ -1259,8 +1362,9 @@ bool tee_pager_handle_fault(struct abort_info *ai)
 
 	if (!tee_pager_unhide_page(area, area_va2idx(area, page_va))) {
 		struct tee_pager_pmem *pmem = NULL;
-		uint32_t attr;
-		paddr_t pa;
+		uint32_t attr = 0;
+		paddr_t pa = 0;
+		size_t tblidx = 0;
 
 		/*
 		 * The page wasn't hidden, but some other core may have
@@ -1276,7 +1380,7 @@ bool tee_pager_handle_fault(struct abort_info *ai)
 			goto out;
 		}
 
-		pmem = tee_pager_get_page(area);
+		pmem = tee_pager_get_page(area->type);
 		if (!pmem) {
 			abort_print(ai);
 			panic();
@@ -1286,8 +1390,12 @@ bool tee_pager_handle_fault(struct abort_info *ai)
 		tee_pager_load_page(area, page_va, pmem->va_alias);
 
 
-		pmem->area = area;
-		pmem->pgidx = area_va2idx(area, ai->va);
+		pmem->fobj = area->fobj;
+		pmem->fobj_pgidx = area_va2idx(area, page_va) +
+				   area->fobj_pgoffs -
+				   ((area->base & CORE_MMU_PGDIR_MASK) >>
+					SMALL_PAGE_SHIFT);
+		tblidx = pmem_get_area_tblidx(pmem, area);
 		attr = get_area_mattr(area->flags);
 		/*
 		 * Pages from PAGER_AREA_TYPE_RW starts read-only to be
@@ -1324,8 +1432,7 @@ bool tee_pager_handle_fault(struct abort_info *ai)
 					TEE_MATTR_PW | TEE_MATTR_UW;
 
 			/* Set a temporary read-only mapping */
-			area_set_entry(pmem->area, pmem->pgidx, pa,
-				       attr & ~mask);
+			area_set_entry(area, tblidx, pa, attr & ~mask);
 			tlbi_mva_allasid(page_va);
 
 			/*
@@ -1338,10 +1445,10 @@ bool tee_pager_handle_fault(struct abort_info *ai)
 				       SMALL_PAGE_SIZE);
 
 			/* Set the final mapping */
-			area_set_entry(area, pmem->pgidx, pa, attr);
+			area_set_entry(area, tblidx, pa, attr);
 			tlbi_mva_allasid(page_va);
 		} else {
-			area_set_entry(area, pmem->pgidx, pa, attr);
+			area_set_entry(area, tblidx, pa, attr);
 			/*
 			 * No need to flush TLB for this entry, it was
 			 * invalid. We should use a barrier though, to make
@@ -1361,6 +1468,8 @@ out:
 	pager_unlock(exceptions);
 	return ret;
 }
+
+
 
 void tee_pager_add_pages(vaddr_t vaddr, size_t npages, bool unmap)
 {
@@ -1397,21 +1506,29 @@ void tee_pager_add_pages(vaddr_t vaddr, size_t npages, bool unmap)
 		pmem->va_alias = pager_add_alias_page(pa);
 
 		if (unmap) {
-			pmem->area = NULL;
-			pmem->pgidx = INVALID_PGIDX;
+			pmem->fobj = NULL;
+			pmem->fobj_pgidx = INVALID_PGIDX;
 			core_mmu_set_entry(ti, pgidx, 0, 0);
 			pgt_dec_used_entries(find_core_pgt(va));
 		} else {
+			struct tee_pager_area *area = NULL;
+
 			/*
 			 * The page is still mapped, let's assign the area
 			 * and update the protection bits accordingly.
 			 */
-			pmem->area = find_area(&tee_pager_area_head, va);
-			assert(pmem->area->pgt == find_core_pgt(va));
-			pmem->pgidx = pgidx;
+			area = find_area(&tee_pager_area_head, va);
+			assert(area);
+			pmem->fobj = area->fobj;
+			assert(area->pgt == find_core_pgt(va));
+			pmem->fobj_pgidx = pgidx + area->fobj_pgoffs -
+					   ((area->base &
+							CORE_MMU_PGDIR_MASK) >>
+						SMALL_PAGE_SHIFT);
+			assert(pgidx == pmem_get_area_tblidx(pmem, area));
 			assert(pa == get_pmem_pa(pmem));
-			area_set_entry(pmem->area, pgidx, pa,
-				       get_area_mattr(pmem->area->flags));
+			area_set_entry(area, pgidx, pa,
+				       get_area_mattr(area->flags));
 		}
 
 		tee_pager_npages++;
@@ -1452,43 +1569,40 @@ void tee_pager_assign_uta_tables(struct user_ta_ctx *utc)
 	}
 }
 
-static void pager_save_and_release_entry(struct tee_pager_pmem *pmem)
-{
-	assert(pmem->area && pmem->area->pgt);
-
-	area_set_entry(pmem->area, pmem->pgidx, 0, 0);
-	tlbi_mva_allasid(area_idx2va(pmem->area, pmem->pgidx));
-	tee_pager_save_page(pmem);
-	assert(pmem->area->pgt->num_used_entries);
-	pmem->area->pgt->num_used_entries--;
-	pmem->pgidx = INVALID_PGIDX;
-	pmem->area = NULL;
-	pmem->flags = 0;
-}
-
 void tee_pager_pgt_save_and_release_entries(struct pgt *pgt)
 {
 	struct tee_pager_pmem *pmem;
 	struct tee_pager_area *area;
 	uint32_t exceptions = pager_lock_check_stack(SMALL_PAGE_SIZE);
+	size_t idx = 0;
+	uint32_t a = 0;
 
 	if (!pgt->num_used_entries)
 		goto out;
 
 	TAILQ_FOREACH(pmem, &tee_pager_pmem_head, link) {
-		if (!pmem->area || pmem->pgidx == INVALID_PGIDX)
+		if (!pmem->fobj)
 			continue;
-		if (pmem->area->pgt == pgt)
-			pager_save_and_release_entry(pmem);
+		TAILQ_FOREACH(area, &pmem->fobj->areas, fobj_link) {
+			if (area->pgt != pgt ||
+			    !pmem_is_covered_by_area(pmem, area))
+				continue;
+
+			idx = pmem_get_area_tblidx(pmem, area);
+			area_get_entry(area, idx, NULL, &a);
+			if (!(a & TEE_MATTR_VALID_BLOCK))
+				continue;
+
+			area_set_entry(area, idx, 0, 0);
+			pgt_dec_used_entries(pgt);
+		}
 	}
 	assert(!pgt->num_used_entries);
 
 out:
-	if (is_user_ta_ctx(pgt->ctx)) {
-		TAILQ_FOREACH(area, to_user_ta_ctx(pgt->ctx)->areas, link) {
-			if (area->pgt == pgt)
-				area->pgt = NULL;
-		}
+	TAILQ_FOREACH(area, to_user_ta_ctx(pgt->ctx)->areas, link) {
+		if (area->pgt == pgt)
+			area->pgt = NULL;
 	}
 
 	pager_unlock(exceptions);
