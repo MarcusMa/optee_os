@@ -7,6 +7,13 @@ CFG_LPAE_ADDR_SPACE_SIZE ?= (1ull << 32)
 CFG_MMAP_REGIONS ?= 13
 CFG_RESERVED_VASPACE_SIZE ?= (1024 * 1024 * 10)
 
+# Should register_phys_mem(MEM_AREA_IO_*, ...) round up/down the area
+# to CORE_MMU_PGDIR_SIZE? Saying 'y' here will consume less space in the page
+# table but may create overlapping mappings with different security attributes
+# (MEM_AREA_IO_SEC and MEM_AREA_IO_NSEC). virt_to_phys(pa, type) should then be
+# used instead of virt_to_phys_io(pa) to disambiguate the mapping.
+CFG_MM_IO_MAP_PGDIR_SIZE ?= y
+
 ifeq ($(CFG_ARM64_core),y)
 CFG_KERN_LINKER_FORMAT ?= elf64-littleaarch64
 CFG_KERN_LINKER_ARCH ?= aarch64
