@@ -838,15 +838,16 @@ void *bgetr(buf, size, poolset)
     if (size > osize)
          V memset((char *) nbuf + osize, 0, size - osize);
 #endif
-    brel(buf, poolset);
+    brel(buf, poolset, false /* wipe */);
     return nbuf;
 }
 
 /*  BREL  --  Release a buffer.  */
 
-void brel(buf, poolset)
+void brel(buf, poolset, wipe)
   void *buf;
   struct bpoolset *poolset;
+  bool wipe;
 {
     struct bfhead *b, *bn;
     bufsize bs;
@@ -857,6 +858,9 @@ void brel(buf, poolset)
 #endif
     assert(buf != NULL);
 
+#ifdef FreeWipe
+    wipe = true;
+#endif
 #ifdef BECtl
     if (b->bh.bsize == 0) {	      /* Directly-acquired buffer? */
 	struct bdhead *bdh;
@@ -868,10 +872,10 @@ void brel(buf, poolset)
 	assert(poolset->totalloc >= 0);
 	poolset->numdrel++;	       /* Number of direct releases */
 #endif /* BufStats */
-#ifdef FreeWipe
-	V memset_unchecked((char *) buf, 0x55,
-			   (MemSize) (bdh->tsize - sizeof(struct bdhead)));
-#endif /* FreeWipe */
+	if (wipe)
+		V memset_unchecked((char *) buf, 0x55,
+				   (MemSize) (bdh->tsize -
+					      sizeof(struct bdhead)));
 	bs = bdh->tsize - sizeof(struct bdhead);
 	assert(poolset->relfcn != NULL);
 	poolset->relfcn((void *) bdh);      /* Release it directly. */
@@ -956,10 +960,9 @@ void brel(buf, poolset)
 
 	bn = BFH(((char *) b) + b->bh.bsize);
     }
-#ifdef FreeWipe
-    V memset_unchecked(((char *) b) + sizeof(struct bfhead), 0x55,
-		       (MemSize) (b->bh.bsize - sizeof(struct bfhead)));
-#endif
+    if (wipe)
+	V memset_unchecked(((char *) b) + sizeof(struct bfhead), 0x55,
+			   (MemSize) (b->bh.bsize - sizeof(struct bfhead)));
     assert(bn->bh.bsize < 0);
 
     /* The next buffer is allocated.  Set the backpointer in it  to  point
