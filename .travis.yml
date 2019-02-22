@@ -11,12 +11,17 @@ cache:
   ccache: true
   directories:
     - $HOME/downloads
+    - $HOME/br2-downloads
 
 git:
   depth: 1000000
 
 before_script:
   - df -h
+  - ls $HOME/downloads
+  - du -sh $HOME/downloads
+  - ls $HOME/br2-downloads; true
+  - du -sh $HOME/br2-downloads; true
   # Store the home repository
   - export MYHOME=$PWD
 
@@ -83,7 +88,7 @@ script:
   - (cd ${HOME}/optee_repo/optee_os; pycodestyle scripts/*.py core/arch/arm/plat-stm32mp1/scripts/stm32image.py)
   # Run regression tests (xtest in QEMU)
   - export CFG_WERROR=y
-  - (cd ${HOME}/optee_repo/build && $make aarch32 && rm -f ${HOME}/optee_repo/toolchains/gcc-*.tar.xz && $make check BR2_CCACHE_DIR=~/.ccache DUMP_LOGS_ON_ERROR=1)
+  - (cd ${HOME}/optee_repo/build && $make aarch32 && rm -f ${HOME}/optee_repo/toolchains/gcc-*.tar.xz && $make check BR2_CCACHE_DIR=~/.ccache BR2_DL_DIR=~/br2-download DUMP_LOGS_ON_ERROR=1)
   - ccache -s
   - df -h
 
