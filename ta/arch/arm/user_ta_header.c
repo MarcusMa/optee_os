@@ -28,6 +28,15 @@ void __utee_entry(unsigned long func, unsigned long session_id,
 			struct utee_params *up, unsigned long cmd_id)
 			__noreturn;
 
+void __noreturn __ta_entry(unsigned long func, unsigned long session_id,
+			   struct utee_params *up, unsigned long cmd_id);
+
+void __noreturn __ta_entry(unsigned long func, unsigned long session_id,
+			   struct utee_params *up, unsigned long cmd_id)
+{
+	__utee_entry(func, session_id, up, cmd_id);
+}
+
 /*
  * According to GP Internal API, TA_STACK_SIZE corresponds to the stack
  * size used by the TA code itself and does not include stack space
@@ -55,9 +64,9 @@ const struct ta_head ta_head __section(".ta_head") = {
 	 * This workaround is neded on 32-bit because it seems we can't
 	 * initialize a 64-bit integer from the address of a function.
 	 */
-	.entry.ptr32 = { .lo = (uint32_t)__utee_entry },
+	.entry.ptr32 = { .lo = (uint32_t)__ta_entry },
 #else
-	.entry.ptr64 = (uint64_t)__utee_entry,
+	.entry.ptr64 = (uint64_t)__ta_entry,
 #endif
 };
 
