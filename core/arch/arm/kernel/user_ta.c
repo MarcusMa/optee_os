@@ -832,6 +832,8 @@ static TEE_Result load_elf_from_store(const TEE_UUID *uuid,
 	if (ta_head->depr_entry != UINT64_MAX) {
 		DMSG("Using decprecated TA entry via ta_head");
 		utc->entry_func = ta_head->depr_entry;
+	} else {
+		file = elf_load_get_file(elf_state);
 	}
 
 	if (elf == exe) {
@@ -879,7 +881,6 @@ static TEE_Result load_elf_from_store(const TEE_UUID *uuid,
 					 CORE_MMU_USER_CODE_SIZE);
 	}
 
-	file = elf_load_get_file(elf_state);
 	for (n = 0; n < num_segs; n++) {
 		uint32_t prot = elf_flags_to_mattr(segs[n].flags);
 		size_t end_va = 0;
@@ -930,7 +931,7 @@ static TEE_Result load_elf_from_store(const TEE_UUID *uuid,
 	if (res)
 		goto out;
 
-	if (!file) {
+	if (!file && ta_head->depr_entry == UINT64_MAX) {
 		res = register_ro_slices(&file, ta_store, handle,
 					 segs, num_segs);
 		if (res)
