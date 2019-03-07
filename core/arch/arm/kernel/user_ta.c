@@ -713,7 +713,7 @@ static size_t aslr_offset(size_t min, size_t max)
 
 static vaddr_t get_stack_va_hint(struct user_ta_ctx *utc)
 {
-	struct vm_region *r;
+	struct vm_region *r = NULL;
 	vaddr_t base = 0;
 
 	r = TAILQ_LAST(&utc->vm_info->regions, vm_region_head);
@@ -828,8 +828,7 @@ static TEE_Result load_elf_from_store(const TEE_UUID *uuid,
 		elf->load_addr = prev->load_addr + prev->mobj_code->size;
 	else
 		elf->load_addr = utc->stack_addr + utc->mobj_stack->size;
-	elf->load_addr = ROUNDUP(elf->load_addr,
-				 CORE_MMU_USER_CODE_SIZE);
+	elf->load_addr = ROUNDUP(elf->load_addr, CORE_MMU_USER_CODE_SIZE);
 
 	for (n = 0; n < num_segs; n++) {
 		uint32_t prot = elf_flags_to_mattr(segs[n].flags) |
