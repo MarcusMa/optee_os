@@ -215,7 +215,7 @@ CFG_TA_ASLR ?= n
 # How much ASLR may shift the base address (in pages). The base address is
 # randomly shifted by an integer number of pages comprised between these two
 # values. Bigger ranges are more secure because they make the addresses harder
-# to guess at the expense of using more memory for the page table.
+# to guess at the expense of using more memory for the page tables.
 CFG_TA_ASLR_MIN_OFFSET_PAGES ?= 0
 CFG_TA_ASLR_MAX_OFFSET_PAGES ?= 128
 
