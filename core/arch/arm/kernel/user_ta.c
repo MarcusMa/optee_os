@@ -830,9 +830,8 @@ static TEE_Result load_elf_from_store(const TEE_UUID *uuid,
 		goto out;
 	ta_head = p;
 	if (ta_head->depr_entry != UINT64_MAX) {
-		DMSG("TA entry via ta_head not supported any longer");
-		res = TEE_ERROR_NOT_SUPPORTED;
-		goto out;
+		DMSG("Using decprecated TA entry via ta_head");
+		utc->entry_func = ta_head->depr_entry;
 	}
 
 	if (elf == exe) {
