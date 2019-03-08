@@ -6,6 +6,7 @@
 
 #include <assert.h>
 #include <compiler.h>
+#include <crypto/crypto.h>
 #include <ctype.h>
 #include <initcall.h>
 #include <keep.h>
@@ -345,7 +346,7 @@ static TEE_Result user_ta_enter(TEE_ErrorOrigin *err,
 	serr = TEE_ORIGIN_TRUSTED_APP;
 
 	if (utc->ctx.panicked) {
-		DMSG("tee_user_ta_enter: TA panicked with code 0x%x\n",
+		DMSG("tee_user_ta_enter: TA panicked with code 0x%x",
 		     utc->ctx.panic_code);
 		serr = TEE_ORIGIN_TEE;
 		res = TEE_ERROR_TARGET_DEAD;
@@ -439,8 +440,8 @@ static void show_elfs(struct user_ta_ctx *utc)
 	size_t __maybe_unused idx = 0;
 
 	TAILQ_FOREACH(elf, &utc->elfs, link)
-		EMSG_RAW(" [%zu] %pUl @ %#" PRIxVA, idx++,
-			 (void *)&elf->uuid, elf->load_addr);
+		EMSG_RAW(" [%zu] %pUl @ 0x%0*" PRIxVA, idx++,
+			 (void *)&elf->uuid, PRIxVA_WIDTH, elf->load_addr);
 }
 
 static void user_ta_dump_state(struct tee_ta_ctx *ctx)
@@ -451,11 +452,11 @@ static void user_ta_dump_state(struct tee_ta_ctx *ctx)
 	char desc[13];
 	size_t n = 0;
 
-	EMSG_RAW(" arch: %s  load address: %#" PRIxVA " ctx-idr: %d",
-		 utc->is_32bit ? "arm" : "aarch64", utc->load_addr,
-		 utc->vm_info->asid);
-	EMSG_RAW(" stack: 0x%" PRIxVA " %zu",
-		 utc->stack_addr, utc->mobj_stack->size);
+	EMSG_RAW(" arch: %s  load address: 0x%0*" PRIxVA " ctx-idr: %d",
+		 utc->is_32bit ? "arm" : "aarch64", PRIxVA_WIDTH,
+		 utc->load_addr, utc->vm_info->asid);
+	EMSG_RAW(" stack: 0x%0*" PRIxVA " %zu",
+		 PRIxVA_WIDTH, utc->stack_addr, utc->mobj_stack->size);
 	TAILQ_FOREACH(r, &utc->vm_info->regions, link) {
 		paddr_t pa = 0;
 
@@ -464,9 +465,10 @@ static void user_ta_dump_state(struct tee_ta_ctx *ctx)
 
 		mattr_perm_to_str(flags, sizeof(flags), r->attr);
 		describe_region(utc, r->va, r->size, desc, sizeof(desc));
-		EMSG_RAW(" region %zu: va %#" PRIxVA " pa %#" PRIxPA
-			 " size %#zx flags %s %s",
-			 n, r->va, pa, r->size, flags, desc);
+		EMSG_RAW(" region %2zu: va 0x%0*" PRIxVA " pa 0x%0*" PRIxPA
+			 " size 0x%06zx flags %s %s",
+			 n, PRIxVA_WIDTH, r->va, PRIxPA_WIDTH, pa, r->size,
+			 flags, desc);
 		n++;
 	}
 	show_elfs(utc);
@@ -784,6 +786,50 @@ static TEE_Result register_ro_slices(struct file **file,
 	return TEE_SUCCESS;
 }
 
+#ifdef CFG_TA_ASLR
+static size_t aslr_offset(size_t min, size_t max)
+{
+	uint32_t rnd32 = 0;
+	size_t rnd = 0;
+
+	assert(min <= max);
+	if (max > min) {
+		if (crypto_rng_read(&rnd32, sizeof(rnd32))) {
+			DMSG("Random read failed");
+			return min;
+		}
+		rnd = rnd32 % (max - min);
+	}
+	return (min + rnd) * CORE_MMU_USER_CODE_SIZE;
+}
+
+static vaddr_t get_stack_va_hint(struct user_ta_ctx *utc)
+{
+	struct vm_region *r = NULL;
+	vaddr_t base = 0;
+
+	r = TAILQ_LAST(&utc->vm_info->regions, vm_region_head);
+	if (r) {
+		/*
+		 * Adding an empty page to separate TA mappings from already
+		 * present mappings with TEE_MATTR_PERMANENT to satisfy
+		 * select_va_in_range()
+		 */
+		base = r->va + r->size + CORE_MMU_USER_CODE_SIZE;
+	} else {
+		core_mmu_get_user_va_range(&base, NULL);
+	}
+
+	return base + aslr_offset(CFG_TA_ASLR_MIN_OFFSET_PAGES,
+				  CFG_TA_ASLR_MAX_OFFSET_PAGES);
+}
+#else
+static vaddr_t get_stack_va_hint(struct user_ta_ctx *utc __unused)
+{
+	return 0;
+}
+#endif
+
 static TEE_Result load_elf_from_store(const TEE_UUID *uuid,
 				      const struct user_ta_store_ops *ta_store,
 				      struct user_ta_ctx *utc)
@@ -856,13 +902,11 @@ static TEE_Result load_elf_from_store(const TEE_UUID *uuid,
 	 * Map physical memory into TA virtual memory
 	 */
 	if (elf == exe) {
-
 		res = vm_info_init(utc);
 		if (res != TEE_SUCCESS)
 			goto out;
 
-		/* Add stack segment */
-		utc->stack_addr = 0;
+		utc->stack_addr = get_stack_va_hint(utc);
 		res = vm_map(utc, &utc->stack_addr, utc->mobj_stack->size,
 			     TEE_MATTR_URW | TEE_MATTR_PRW, utc->mobj_stack,
 			     0);
@@ -874,12 +918,12 @@ static TEE_Result load_elf_from_store(const TEE_UUID *uuid,
 	if (res != TEE_SUCCESS)
 		goto out;
 
-	if (prev) {
+	if (prev)
 		elf->load_addr = prev->segs[prev->num_segs - 1].va +
 				 prev->segs[prev->num_segs - 1].size;
-		elf->load_addr = ROUNDUP(elf->load_addr,
-					 CORE_MMU_USER_CODE_SIZE);
-	}
+	else
+		elf->load_addr = utc->stack_addr + utc->mobj_stack->size;
+	elf->load_addr = ROUNDUP(elf->load_addr, CORE_MMU_USER_CODE_SIZE);
 
 	for (n = 0; n < num_segs; n++) {
 		uint32_t prot = elf_flags_to_mattr(segs[n].flags);

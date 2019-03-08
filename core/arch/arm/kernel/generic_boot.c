@@ -514,6 +514,7 @@ void *get_embedded_dt(void)
 		checked = true;
 	}
 
+	IMSG("Embedded DTB found");
 	return embedded_secure_dtb;
 }
 #else
@@ -611,7 +612,7 @@ static int add_optee_dt_node(struct dt_descriptor *dt)
 	int ret;
 
 	if (fdt_path_offset(dt->blob, "/firmware/optee") >= 0) {
-		DMSG("OP-TEE Device Tree node already exists!\n");
+		DMSG("OP-TEE Device Tree node already exists!");
 		return 0;
 	}
 
@@ -647,7 +648,7 @@ static int dt_add_psci_node(struct dt_descriptor *dt)
 	int offs;
 
 	if (fdt_path_offset(dt->blob, "/psci") >= 0) {
-		DMSG("PSCI Device Tree node already exists!\n");
+		DMSG("PSCI Device Tree node already exists!");
 		return 0;
 	}
 
@@ -899,7 +900,6 @@ static void init_external_dt(unsigned long phys_dt)
 	int ret;
 
 	if (!phys_dt) {
-		EMSG("Device Tree missing");
 		/*
 		 * No need to panic as we're not using the DT in OP-TEE
 		 * yet, we're only adding some nodes for normal world use.
@@ -908,6 +908,7 @@ static void init_external_dt(unsigned long phys_dt)
 		 * initialize devices based on DT we'll likely panic
 		 * instead of returning here.
 		 */
+		IMSG("No non-secure external DT");
 		return;
 	}
 
@@ -933,6 +934,8 @@ static void init_external_dt(unsigned long phys_dt)
 		     phys_dt, ret);
 		panic();
 	}
+
+	IMSG("Non-secure external DT found");
 }
 
 static void update_external_dt(void)
@@ -1065,10 +1068,10 @@ static void init_primary_helper(unsigned long pageable_part,
 #endif
 	release_external_dt();
 #ifdef CFG_VIRTUALIZATION
-	IMSG("Initializing virtualization support\n");
+	IMSG("Initializing virtualization support");
 	core_mmu_init_virtualization();
 #endif
-	DMSG("Primary CPU switching to normal world boot\n");
+	DMSG("Primary CPU switching to normal world boot");
 }
 
 /* What this function is using is needed each time another CPU is started */
@@ -1092,7 +1095,7 @@ static void init_secondary_helper(unsigned long nsec_entry)
 	init_vfp_sec();
 	init_vfp_nsec();
 
-	DMSG("Secondary CPU Switching to normal world boot\n");
+	DMSG("Secondary CPU Switching to normal world boot");
 }
 
 #if defined(CFG_WITH_ARM_TRUSTED_FW)
