@@ -460,6 +460,7 @@
 #endif
 
 #include <stdio.h>
+#include <stdbool.h>
 
 #ifdef lint
 #define NDEBUG			      /* Exits in asserts confuse lint */
@@ -847,7 +848,7 @@ void *bgetr(buf, size, poolset)
 void brel(buf, poolset, wipe)
   void *buf;
   struct bpoolset *poolset;
-  bool wipe;
+  int wipe;
 {
     struct bfhead *b, *bn;
     bufsize bs;
