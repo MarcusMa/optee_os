@@ -8,6 +8,7 @@
 
 #include <arm.h>
 #include <assert.h>
+#include <io.h>
 #include <keep.h>
 #include <kernel/asan.h>
 #include <kernel/lockdep.h>
@@ -1502,6 +1503,8 @@ static uint32_t get_rpc_arg(uint32_t cmd, size_t num_params,
 	arg->ret = TEE_ERROR_GENERIC; /* in case value isn't updated */
 
 	for (size_t n = 0; n < num_params; n++) {
+		struct mobj *mobj = NULL;
+
 		switch (params[n].attr) {
 		case THREAD_PARAM_ATTR_NONE:
 			arg->params[n].attr = OPTEE_MSG_ATTR_TYPE_NONE;
@@ -1519,13 +1522,11 @@ static uint32_t get_rpc_arg(uint32_t cmd, size_t num_params,
 		case THREAD_PARAM_ATTR_MEMREF_IN:
 		case THREAD_PARAM_ATTR_MEMREF_OUT:
 		case THREAD_PARAM_ATTR_MEMREF_INOUT:
-			if (!params[n].u.memref.mobj ||
-			    mobj_matches(params[n].u.memref.mobj,
-					 CORE_MEM_NSEC_SHM)) {
+			mobj = READ_ONCE(params[n].u.memref.mobj);
+			if (!mobj || mobj_matches(mobj, CORE_MEM_NSEC_SHM)) {
 				if (!set_tmem(arg->params + n, params + n))
 					return TEE_ERROR_BAD_PARAMETERS;
-			} else  if (mobj_matches(params[n].u.memref.mobj,
-						 CORE_MEM_REG_SHM)) {
+			} else  if (mobj_matches(mobj, CORE_MEM_REG_SHM)) {
 				if (!set_rmem(arg->params + n, params + n))
 					return TEE_ERROR_BAD_PARAMETERS;
 			} else {
@@ -1624,21 +1625,23 @@ static struct mobj *get_rpc_alloc_res(struct optee_msg_arg *arg,
 	struct mobj *mobj = NULL;
 	uint64_t cookie = 0;
 	size_t psize = 0;
+	uint64_t attr = 0;
 
 	if (arg->ret || arg->num_params != 1)
 		return NULL;
 
-	psize = arg->params[0].u.tmem.size;
+	psize = READ_ONCE(arg->params[0].u.tmem.size);
 	if (psize < size)
 		return NULL;
 
-	if (arg->params[0].attr == OPTEE_MSG_ATTR_TYPE_TMEM_OUTPUT) {
+	attr = READ_ONCE(arg->params[0].attr);
+	if (attr == OPTEE_MSG_ATTR_TYPE_TMEM_OUTPUT) {
 		cookie = arg->params[0].u.tmem.shm_ref;
 		mobj = mobj_shm_alloc(arg->params[0].u.tmem.buf_ptr,
 				      psize,
 				      cookie);
-	} else if (arg->params[0].attr == (OPTEE_MSG_ATTR_TYPE_TMEM_OUTPUT |
-					   OPTEE_MSG_ATTR_NONCONTIG)) {
+	} else if (attr == (OPTEE_MSG_ATTR_TYPE_TMEM_OUTPUT |
+			    OPTEE_MSG_ATTR_NONCONTIG)) {
 		cookie = arg->params[0].u.tmem.shm_ref;
 		mobj = msg_param_mobj_from_noncontig(
 			arg->params[0].u.tmem.buf_ptr,
