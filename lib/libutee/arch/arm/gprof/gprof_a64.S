@@ -47,9 +47,9 @@ END_FUNC __utee_mcount
  * The TA linker script always references __utee_mcount so provide a version
  * that does nothing
  */
-	.weak __utee_mcount
 FUNC __utee_mcount, :
 	ret
 END_FUNC __utee_mcount
+	.weak __utee_mcount
 
 #endif /* CFG_TA_GPROF_SUPPORT */

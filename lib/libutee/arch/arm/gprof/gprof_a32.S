@@ -44,11 +44,11 @@ END_FUNC __utee_mcount
  * that just pops one register (lr) off the stack, since that's the ABI we must
  * follow.
  */
-	.weak __utee_mcount
 FUNC __utee_mcount, :
 	push		{lr}
 	pop		{ip, lr}
 	bx		ip
 END_FUNC __utee_mcount
+	.weak __utee_mcount
 
 #endif /* CFG_TA_GPROF_SUPPORT */
